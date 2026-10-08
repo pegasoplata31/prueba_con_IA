@@ -10,11 +10,11 @@ enum HandSide { left, right }
 
 /// Una trama de sensores de un guante.
 class SensorFrame {
-  final List<double> fingers; // 5 valores 0/1
-  final double pitch;         // grados
-  final double roll;          // grados
-  final double ax, ay, az;    // g
-  final double gx, gy, gz;    // °/s
+  final List<double> fingers;
+  final double pitch;
+  final double roll;
+  final double ax, ay, az;
+  final double gx, gy, gz;
   final DateTime time;
 
   SensorFrame({
@@ -30,16 +30,6 @@ class SensorFrame {
     DateTime? time,
   }) : time = time ?? DateTime.now();
 
-  /// Decodifica el paquete binario de 17 bytes del ESP32.
-  /// [0]      uint8_t  fingers (bit0=pulgar ... bit4=meñique)
-  /// [1..2]   int16_t  pitch   /100
-  /// [3..4]   int16_t  roll    /100
-  /// [5..6]   int16_t  ax      /100
-  /// [7..8]   int16_t  ay      /100
-  /// [9..10]  int16_t  az      /100
-  /// [11..12] int16_t  gx      /10
-  /// [13..14] int16_t  gy      /10
-  /// [15..16] int16_t  gz      /10
   static SensorFrame? fromBinary(List<int> bytes) {
     if (bytes.length < 17) return null;
     try {
@@ -48,11 +38,11 @@ class SensorFrame {
 
       final mask = data.getUint8(0);
       final fingers = <double>[
-        (mask & 0x01) != 0 ? 1.0 : 0.0, // pulgar
-        (mask & 0x02) != 0 ? 1.0 : 0.0, // índice
-        (mask & 0x04) != 0 ? 1.0 : 0.0, // medio
-        (mask & 0x08) != 0 ? 1.0 : 0.0, // anular
-        (mask & 0x10) != 0 ? 1.0 : 0.0, // meñique
+        (mask & 0x01) != 0 ? 1.0 : 0.0,
+        (mask & 0x02) != 0 ? 1.0 : 0.0,
+        (mask & 0x04) != 0 ? 1.0 : 0.0,
+        (mask & 0x08) != 0 ? 1.0 : 0.0,
+        (mask & 0x10) != 0 ? 1.0 : 0.0,
       ];
 
       int off = 1;
@@ -65,20 +55,19 @@ class SensorFrame {
       return SensorFrame(
         fingers: fingers,
         pitch: next(100.0),
-        roll:  next(100.0),
-        ax:    next(100.0),
-        ay:    next(100.0),
-        az:    next(100.0),
-        gx:    next(10.0),
-        gy:    next(10.0),
-        gz:    next(10.0),
+        roll: next(100.0),
+        ax: next(100.0),
+        ay: next(100.0),
+        az: next(100.0),
+        gx: next(10.0),
+        gy: next(10.0),
+        gz: next(10.0),
       );
     } catch (_) {
       return null;
     }
   }
 
-  /// Parser CSV antiguo (compatibilidad con firmware viejo).
   static SensorFrame? fromCsv(String raw) {
     final parts = raw.trim().split(',');
     if (parts.length < 9) return null;
@@ -105,7 +94,6 @@ class SensorFrame {
     );
   }
 
-  /// Vector normalizado de 13 dimensiones por mano.
   List<double> normalizedVector() => [
         ...fingers,
         pitch / 180.0,
@@ -118,11 +106,9 @@ class SensorFrame {
         gz / 10.0,
       ];
 
-  /// Aceleración resultante (para detección automática de movimiento).
   double get accelMagnitude =>
       math.sqrt(ax * ax + ay * ay + az * az);
 
-  /// Etiqueta corta para el terminal.
   String shortLabel() {
     final b = fingers.map((f) => f >= .5 ? '1' : '0').join();
     return '$b P${pitch.toStringAsFixed(1)} '
@@ -194,32 +180,11 @@ class BimanualVector {
 class TrainingGesture {
   final String id;
   final Map<String, String> translations;
-  final bool isDynamic;
-  final bool useLeft;
-  final bool useRight;
-
-  /// Para señas estáticas: cada muestra es un vector de 26 dims.
-  final List<List<double>> samples;
-
-  /// Para señas dinámicas: cada muestra es una secuencia temporal.
-  final List<List<List<double>>> sequences;
-
-  class TrainingGesture {
-  final String id;
-  final Map<String, String> translations;
-
-  /// Traducciones automáticas generadas por ML Kit.
-  /// Se llenan cuando el usuario cambia de idioma en el dropdown.
   final Map<String, String> autoTranslations;
-
   final bool isDynamic;
   final bool useLeft;
   final bool useRight;
-
-  /// Para señas estáticas: cada muestra es un vector de 26 dims.
   final List<List<double>> samples;
-
-  /// Para señas dinámicas: cada muestra es una secuencia temporal.
   final List<List<List<double>>> sequences;
 
   TrainingGesture({
@@ -234,10 +199,6 @@ class TrainingGesture {
   })  : samples = samples ?? const [],
         sequences = sequences ?? const [];
 
-  /// Devuelve la traducción para [lang], priorizando:
-  ///   1. Traducción manual escrita por el usuario.
-  ///   2. Traducción automática de ML Kit.
-  ///   3. El id original de la seña.
   String getTranslation(String lang) {
     final manual = translations[lang];
     if (manual != null && manual.trim().isNotEmpty) return manual;
@@ -254,7 +215,6 @@ class TrainingGesture {
     return id;
   }
 
-  /// Devuelve una copia con las traducciones automáticas actualizadas.
   TrainingGesture copyWithAutoTranslations(Map<String, String> newAuto) {
     return TrainingGesture(
       id: id,
@@ -268,7 +228,7 @@ class TrainingGesture {
     );
   }
 
-   Map<String, dynamic> toJson() => {
+  Map<String, dynamic> toJson() => {
         'id': id,
         'translations': translations,
         'autoTranslations': autoTranslations,
@@ -296,8 +256,10 @@ class TrainingGesture {
 
     return TrainingGesture(
       id: json['id'] as String,
-      translations: Map<String, String>.from(json['translations'] as Map? ?? {}),
-      autoTranslations: Map<String, String>.from(json['autoTranslations'] as Map? ?? {}), 
+      translations:
+          Map<String, String>.from(json['translations'] as Map? ?? {}),
+      autoTranslations:
+          Map<String, String>.from(json['autoTranslations'] as Map? ?? {}),
       isDynamic: json['isDynamic'] as bool? ?? false,
       useLeft: json['useLeft'] as bool? ?? true,
       useRight: json['useRight'] as bool? ?? true,
@@ -314,7 +276,7 @@ class RecognitionResult {
   RecognitionResult(this.gesture, this.distance, this.confidence);
 }
 
-/// Motor de reconocimiento (KNN + DTW + umbrales relajados).
+/// Motor de reconocimiento (KNN + DTW).
 class GestureMath {
   static double vectorDistance(List<double> a, List<double> b) {
     if (a.length != b.length || a.isEmpty) return double.infinity;
@@ -326,7 +288,6 @@ class GestureMath {
     return math.sqrt(sum / a.length);
   }
 
-  /// DTW entre dos secuencias de vectores de la misma dimensión.
   static double dtw(
     List<List<double>> a,
     List<List<double>> b, {
@@ -363,11 +324,10 @@ class GestureMath {
     return prev[m] / math.max(n, m);
   }
 
-  /// Reconoce una seña estática (vector de 26 dims).
   static RecognitionResult? recognizeStatic(
     List<double> vector,
     List<TrainingGesture> gestures, {
-    double threshold = 0.60, // relajado (antes 0.42)
+    double threshold = 0.60,
     int k = 3,
   }) {
     RecognitionResult? best;
@@ -395,11 +355,10 @@ class GestureMath {
     return best;
   }
 
-  /// Reconoce una seña dinámica (secuencia temporal).
   static RecognitionResult? recognizeDynamic(
     List<List<double>> sequence,
     List<TrainingGesture> gestures, {
-    double threshold = 0.55, // relajado (antes 0.35)
+    double threshold = 0.55,
     int k = 3,
   }) {
     if (sequence.isEmpty) return null;
@@ -449,8 +408,6 @@ class MotionSegmenter {
   bool get isActive => _active;
   int get frameCount => _buffer.length;
 
-  /// Introduce una muestra. Devuelve una secuencia completa cuando
-  /// el movimiento terminó.
   List<List<double>>? push(List<double> vector, double accelMag) {
     final resting = accelMag >= restMin && accelMag <= restMax;
 

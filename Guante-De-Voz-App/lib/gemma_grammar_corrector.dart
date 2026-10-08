@@ -3,7 +3,6 @@
 //  Corrector gramatical OFFLINE con Gemma 3 1B (LiteRT-LM).
 // ============================================================
 
-import 'dart:async';
 import 'package:flutter_gemma/flutter_gemma.dart';
 import 'package:flutter_gemma_litertlm/flutter_gemma_litertlm.dart';
 
@@ -28,7 +27,6 @@ class GemmaGrammarCorrector {
   InferenceModel? _model;
 
   /// Nombre del archivo del modelo en HuggingFace.
-  /// Gemma 3 1B está en un repo gated.
   static const String _modelFileName =
       'Gemma3-1B-IT_q4_ekv1280_multi-prefill-seq.litertlm';
 
@@ -127,13 +125,9 @@ Secuencia de entrada: $inputText
 
 Oración corregida:''';
 
-      final chat = await _model!.createChat(
-        temperature: 0.3,
-      );
-
+      final chat = await _model!.createChat(temperature: 0.3);
       await chat.addQueryChunk(Message.text(text: prompt, isUser: true));
       final response = await chat.generateChatResponse();
-
       await chat.close();
 
       String cleaned = '';

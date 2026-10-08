@@ -1,0 +1,15 @@
+// init.gradle — script auxiliar (no se usa actualmente en el workflow).
+allprojects {
+    afterEvaluate { project ->
+        if (project.hasProperty('android')) {
+            project.android {
+                compileSdkVersion 36
+                defaultConfig {
+                    targetSdkVersion 34
+                    minSdkVersion 23
+                }
+            }
+            println "✓ Forzado compileSdk 36 en ${project.name}"
+        }
+    }
+}

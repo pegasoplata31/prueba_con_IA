@@ -1,0 +1,41 @@
+name: beyond_words
+description: Beyond Words — App Android BLE para guantes de lengua de señas.
+publish_to: "none"
+version: 2.0.0+2
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_blue_plus: ^2.3.13
+  flutter_tts: ^4.2.5
+  shared_preferences: ^2.5.3
+  permission_handler: ^12.0.3
+  file_picker: ^8.0.0
+  path_provider: ^2.1.0
+  http: ^1.2.0
+  
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/logo.png
+  # Si más adelante quieres tipografía tipo logo (cursiva elegante),
+  # descomenta estas líneas y coloca los .ttf en assets/fonts/:
+  #
+  # fonts:
+  #   - family: Snell Roundhand
+  #     fonts:
+  #       - asset: assets/fonts/SnellRoundhand.ttf
+  #   - family: SF Pro Display
+  #     fonts:
+  #       - asset: assets/fonts/SFProDisplay-Regular.ttf
+  #       - asset: assets/fonts/SFProDisplay-Bold.ttf
+  #         weight: 700

@@ -204,9 +204,28 @@ class TrainingGesture {
   /// Para señas dinámicas: cada muestra es una secuencia temporal.
   final List<List<List<double>>> sequences;
 
+  class TrainingGesture {
+  final String id;
+  final Map<String, String> translations;
+
+  /// Traducciones automáticas generadas por ML Kit.
+  /// Se llenan cuando el usuario cambia de idioma en el dropdown.
+  final Map<String, String> autoTranslations;
+
+  final bool isDynamic;
+  final bool useLeft;
+  final bool useRight;
+
+  /// Para señas estáticas: cada muestra es un vector de 26 dims.
+  final List<List<double>> samples;
+
+  /// Para señas dinámicas: cada muestra es una secuencia temporal.
+  final List<List<List<double>>> sequences;
+
   TrainingGesture({
     required this.id,
     required this.translations,
+    this.autoTranslations = const {},
     this.isDynamic = false,
     this.useLeft = true,
     this.useRight = true,
@@ -215,9 +234,44 @@ class TrainingGesture {
   })  : samples = samples ?? const [],
         sequences = sequences ?? const [];
 
-  Map<String, dynamic> toJson() => {
+  /// Devuelve la traducción para [lang], priorizando:
+  ///   1. Traducción manual escrita por el usuario.
+  ///   2. Traducción automática de ML Kit.
+  ///   3. El id original de la seña.
+  String getTranslation(String lang) {
+    final manual = translations[lang];
+    if (manual != null && manual.trim().isNotEmpty) return manual;
+
+    final auto = autoTranslations[lang];
+    if (auto != null && auto.trim().isNotEmpty) return auto;
+
+    if (lang.startsWith('es-')) {
+      return translations['es'] ?? autoTranslations['es'] ?? id;
+    }
+    if (lang.startsWith('zh-')) {
+      return translations['zh'] ?? autoTranslations['zh'] ?? id;
+    }
+    return id;
+  }
+
+  /// Devuelve una copia con las traducciones automáticas actualizadas.
+  TrainingGesture copyWithAutoTranslations(Map<String, String> newAuto) {
+    return TrainingGesture(
+      id: id,
+      translations: translations,
+      autoTranslations: {...autoTranslations, ...newAuto},
+      isDynamic: isDynamic,
+      useLeft: useLeft,
+      useRight: useRight,
+      samples: samples,
+      sequences: sequences,
+    );
+  }
+
+   Map<String, dynamic> toJson() => {
         'id': id,
         'translations': translations,
+        'autoTranslations': autoTranslations,
         'isDynamic': isDynamic,
         'useLeft': useLeft,
         'useRight': useRight,
@@ -242,8 +296,8 @@ class TrainingGesture {
 
     return TrainingGesture(
       id: json['id'] as String,
-      translations:
-          Map<String, String>.from(json['translations'] as Map? ?? {}),
+      translations: Map<String, String>.from(json['translations'] as Map? ?? {}),
+      autoTranslations: Map<String, String>.from(json['autoTranslations'] as Map? ?? {}), 
       isDynamic: json['isDynamic'] as bool? ?? false,
       useLeft: json['useLeft'] as bool? ?? true,
       useRight: json['useRight'] as bool? ?? true,

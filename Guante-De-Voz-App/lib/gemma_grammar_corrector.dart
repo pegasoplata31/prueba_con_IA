@@ -5,6 +5,7 @@
 
 import 'package:flutter_gemma/flutter_gemma.dart';
 import 'package:flutter_gemma_litertlm/flutter_gemma_litertlm.dart';
+import 'package:flutter_gemma/core/domain/download_exception.dart';
 
 class GrammarCorrectionResult {
   final String corrected;
@@ -28,7 +29,7 @@ class GemmaGrammarCorrector {
 
   /// Nombre del archivo del modelo en HuggingFace.
   static const String _modelFileName =
-      'Gemma3-1B-IT_q4_ekv1280_multi-prefill-seq.litertlm';
+      Gemma3-1B-IT_multi-prefill-seq_q4_ekv4096.litertlm;
 
   /// Verifica si el modelo ya está descargado en el dispositivo.
   Future<bool> isModelInstalled() async {
@@ -41,7 +42,7 @@ class GemmaGrammarCorrector {
 
   /// Descarga el modelo desde HuggingFace.
   /// ⚠️ El repo es gated: requiere un token de HuggingFace con acceso aprobado.
-  Future<bool> downloadModel({
+    Future<bool> downloadModel({
     required String huggingFaceToken,
     void Function(double progress)? onProgress,
   }) async {
@@ -63,7 +64,31 @@ class GemmaGrammarCorrector {
 
       _modelInstalled = true;
       return true;
+    } on DownloadException catch (e) {
+      // 🔥 Aquí capturamos el error REAL
+      print('DownloadException: ${e.error.runtimeType} - ${e.error.toUserMessage()}');
+      
+      switch (e.error) {
+        case UnauthorizedError():
+          print('❌ Token inválido o faltante (401)');
+        case ForbiddenError():
+          print('❌ No tienes acceso aprobado al modelo (403)');
+        case NotFoundError():
+          print('❌ Archivo no encontrado - revisa el nombre (404)');
+        case RateLimitedError():
+          print('❌ Demasiadas peticiones, espera un momento (429)');
+        case ServerError():
+          print('❌ Error del servidor de HuggingFace (5xx)');
+        case NetworkError():
+          print('❌ Error de red - revisa tu conexión');
+        case CanceledError():
+          print('❌ Descarga cancelada por el usuario');
+        case UnknownError():
+          print('❌ Error desconocido: ${e.error.toUserMessage()}');
+      }
+      return false;
     } catch (e) {
+      print('Error general: $e');
       return false;
     }
   }

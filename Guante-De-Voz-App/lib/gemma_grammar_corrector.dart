@@ -58,7 +58,7 @@ class GemmaGrammarCorrector {
             'https://huggingface.co/litert-community/Gemma3-1B-IT/resolve/main/$_modelFileName',
             token: huggingFaceToken,
           )
-          .withProgress((p) => onProgress?.call(p))
+          .withProgress((p) => onProgress?.call(p.toDouble()))
           .install();
 
       _modelInstalled = true;
@@ -134,7 +134,7 @@ Oración corregida:''';
       if (response is TextResponse) {
         cleaned = response.token.trim();
       }
-      cleaned = cleaned.replaceAll(RegExp(r'^["\'"«»]+|["\'"«»]+$'), '');
+      cleaned = cleaned.replaceAll(RegExp(r'''^["'«»]+|["'«»]+$'''), '');
 
       if (cleaned.isEmpty) {
         return GrammarCorrectionResult.failure('Respuesta vacía');

@@ -29,7 +29,7 @@ class GemmaGrammarCorrector {
 
   /// Nombre del archivo del modelo en HuggingFace.
   static const String _modelFileName =
-      Gemma3-1B-IT_multi-prefill-seq_q4_ekv4096.litertlm;
+      'Gemma3-1B-IT_multi-prefill-seq_q4_ekv4096.litertlm';
 
   /// Verifica si el modelo ya está descargado en el dispositivo.
   Future<bool> isModelInstalled() async {

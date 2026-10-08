@@ -10,7 +10,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'ble_manager.dart';
 import 'models.dart';
 import 'storage.dart';
-import 'json_exporter.dart'; 
+import 'json_exporter.dart';
+import 'ml_kit_translator.dart';
+import 'gemma_grammar_corrector.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -148,7 +150,11 @@ class _BeyondWordsAppState extends State<BeyondWordsApp> {
       ),
     );
   }
-}/// Fondo con degradado frío + orbes difusos (Liquid Glass).
+}
+
+// ============================================================
+//  Fondo con degradado frío + orbes difusos (Liquid Glass).
+// ============================================================
 class LiquidBackground extends StatelessWidget {
   final Widget child;
   final bool darkMode;
@@ -210,7 +216,9 @@ class LiquidBackground extends StatelessWidget {
       );
 }
 
-/// Tarjeta de vidrio con blur, borde luminoso y sombra fría.
+// ============================================================
+//  Tarjeta de vidrio con blur, borde luminoso y sombra fría.
+// ============================================================
 class GlassCard extends StatelessWidget {
   final Widget child;
   final EdgeInsets padding;
@@ -271,7 +279,9 @@ class GlassCard extends StatelessWidget {
   }
 }
 
-/// Botón tipo iOS con efecto líquido.
+// ============================================================
+//  Botón tipo iOS con efecto líquido.
+// ============================================================
 class LiquidButton extends StatelessWidget {
   final String label;
   final IconData? icon;
@@ -352,7 +362,12 @@ class LiquidButton extends StatelessWidget {
       ),
     );
   }
-}class Lang {
+}
+
+// ============================================================
+//  Idiomas disponibles (13) y traducciones built-in.
+// ============================================================
+class Lang {
   final String code;
   final String tts;
   final String label;
@@ -430,7 +445,12 @@ String builtInTranslation(String word, String lang) {
     },
   };
   return dict[key]?[lang] ?? word;
-}class HomeShell extends StatefulWidget {
+}
+
+// ============================================================
+//  HomeShell — pantalla principal con la navegación de 4 tabs.
+// ============================================================
+class HomeShell extends StatefulWidget {
   final bool darkMode;
   final String uiLanguage;
   final double speechRate;
@@ -460,7 +480,30 @@ class _HomeShellState extends State<HomeShell> {
   final ble = BleManager();
   final storage = GestureStorage();
   final tts = FlutterTts();
+  final mlTranslator = MlKitTranslator();
+  final grammarCorrector = GemmaGrammarCorrector();
 
+  // --- Estado de ML Kit: precarga inicial ---
+  bool _mlPreloadNeeded = false;
+  bool _mlPreloading = false;
+  int _mlPreloadDone = 0;
+  int _mlPreloadTotal = 0;
+  String _mlPreloadCurrentLang = '';
+  bool _mlModelsReady = false;
+
+  // --- Estado de ML Kit: traducción en curso ---
+  bool _autoTranslating = false;
+  int _autoTranslateDone = 0;
+  int _autoTranslateTotal = 0;
+
+  // --- Estado del corrector Gemma ---
+  bool _gemmaModelInstalled = false;
+  bool _gemmaDownloading = false;
+  double _gemmaDownloadProgress = 0.0;
+  bool _isCorrecting = false;
+  String _hfToken = '';
+
+  // --- Datos de sensores ---
   final List<SensorFrame> leftWindow = [];
   final List<SensorFrame> rightWindow = [];
   final List<LogEntry> logs = [];
@@ -484,7 +527,7 @@ class _HomeShellState extends State<HomeShell> {
   bool dynamicMode = false;
   final List<List<double>> dynamicBuffer = [];
 
-  bool phraseMode = false;              
+  bool phraseMode = false;
   final List<String> phraseWords = [];
 
   String _t(String es, String en) =>
@@ -492,7 +535,6 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   void initState() {
-    // ...
     super.initState();
     _load();
     ble.addListener(_refresh);
@@ -501,8 +543,13 @@ class _HomeShellState extends State<HomeShell> {
       const Duration(milliseconds: 100),
       (_) => _recognizeTick(),
     );
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _showCalibrationWarning();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      await _showCalibrationWarning();
+      if (!mounted) return;
+      if (_mlPreloadNeeded) {
+        await _showMlKitPreloadDialog();
+      }
     });
   }
 
@@ -517,6 +564,21 @@ class _HomeShellState extends State<HomeShell> {
             .toList();
       } catch (_) {}
     }
+
+    // Detección de primer arranque para modelos ML Kit.
+    final preloaded = p.getBool('ml_models_preloaded') ?? false;
+    if (!preloaded) {
+      _mlPreloadNeeded = true;
+    } else {
+      final esOk = await mlTranslator.isModelDownloaded('es-PA');
+      final enOk = await mlTranslator.isModelDownloaded('en');
+      _mlModelsReady = esOk && enOk;
+    }
+
+    // Cargar token de HuggingFace y estado del corrector Gemma.
+    _hfToken = p.getString('hf_token') ?? '';
+    _gemmaModelInstalled = await grammarCorrector.isModelInstalled();
+
     if (mounted) setState(() {});
   }
 
@@ -552,7 +614,6 @@ class _HomeShellState extends State<HomeShell> {
     while (w.length > 30) w.removeAt(0);
   }
 
-  // ---- Vector actual (promedio de últimos 500 ms) ----
   List<double>? _currentVector() {
     final now = DateTime.now();
     final l = leftWindow
@@ -568,7 +629,6 @@ class _HomeShellState extends State<HomeShell> {
     return BimanualVector.fromFrames(la, ra).values;
   }
 
-  // ---- Detección de movimiento para señas dinámicas ----
   void _feedSegmenters() {
     final now = DateTime.now();
     final l = leftWindow.where(
@@ -605,29 +665,24 @@ class _HomeShellState extends State<HomeShell> {
         _tryDynamicRecognition();
       }
     } else if (segmenterLeft.isActive || segmenterRight.isActive) {
-      // Ventana activa: alimentar el buffer para la vista en vivo.
       setState(() {
         dynamicBuffer.add(vector);
         while (dynamicBuffer.length > 120) dynamicBuffer.removeAt(0);
       });
     }
 
-    // Silencio por reposo: si la aceleración está en rango de reposo,
-    // forzar bloqueo de traducción.
     if (combined >= 0.80 && combined <= 1.20) {
       stability.reset();
     }
   }
 
-  // ---- Tick de reconocimiento (100 ms) ----
   void _recognizeTick() {
     if (gestures.isEmpty) return;
-    if (dynamicMode) return; // el reconocimiento dinámico va por evento
+    if (dynamicMode) return;
 
     final v = _currentVector();
     if (v == null) return;
 
-    // Anti-reposo
     if (restVector != null && restVector!.length == v.length) {
       final restDist = GestureMath.vectorDistance(v, restVector!);
       if (restDist < 0.30) {
@@ -654,6 +709,13 @@ class _HomeShellState extends State<HomeShell> {
     recognized = id;
     confidence = conf;
     if (mounted) setState(() {});
+
+    if (phraseMode && id != '—') {
+      if (phraseWords.isEmpty ||
+          phraseWords.last.toLowerCase() != id.toLowerCase()) {
+        phraseWords.add(id);
+      }
+    }
   }
 
   TrainingGesture? get currentGesture {
@@ -667,20 +729,12 @@ class _HomeShellState extends State<HomeShell> {
     if (recognized == '—') return '—';
     final g = currentGesture;
     if (g != null) {
-      final exact = g.translations[language];
-      if (exact != null && exact.trim().isNotEmpty) return exact;
-      if (language.startsWith('es-')) {
-        return g.translations['es'] ?? g.id;
-      }
-      if (language.startsWith('zh-')) {
-        return g.translations['zh'] ?? g.id;
-      }
-      return g.translations[language] ?? g.id;
+      return g.getTranslation(language);
     }
     return builtInTranslation(recognized, language);
   }
 
-    Future<void> _speak() async {
+  Future<void> _speak() async {
     if (translated == '—') return;
     final lang = kLanguages.firstWhere(
       (l) => l.code == language,
@@ -692,26 +746,30 @@ class _HomeShellState extends State<HomeShell> {
     await tts.speak(translated);
   }
 
-    Future<void> _speakPhrase() async {
+  Future<void> _speakPhrase() async {
     if (phraseWords.isEmpty) return;
 
-    // Traduce cada palabra con la tabla del gesto si existe
     final translatedWords = phraseWords.map((word) {
       for (final g in gestures) {
         if (g.id.toLowerCase() == word.toLowerCase()) {
-          final exact = g.translations[language];
-          if (exact != null && exact.trim().isNotEmpty) return exact;
-          if (language.startsWith('es-')) {
-            return g.translations['es'] ?? word;
-          }
-          if (language.startsWith('zh-')) {
-            return g.translations['zh'] ?? word;
-          }
-          return g.translations[language] ?? word;
+          return g.getTranslation(language);
         }
       }
       return builtInTranslation(word, language);
     }).join(' ');
+
+    String finalPhrase = translatedWords;
+    if (_gemmaModelInstalled) {
+      setState(() => _isCorrecting = true);
+      final result = await grammarCorrector.correctPhrase(
+        translatedWords,
+        targetLanguage: language,
+      );
+      setState(() => _isCorrecting = false);
+      if (result.success && result.corrected.isNotEmpty) {
+        finalPhrase = result.corrected;
+      }
+    }
 
     final lang = kLanguages.firstWhere(
       (l) => l.code == language,
@@ -720,7 +778,7 @@ class _HomeShellState extends State<HomeShell> {
     await tts.setLanguage(lang.tts);
     await tts.setSpeechRate(widget.speechRate);
     await tts.setVolume(widget.speechVolume);
-    await tts.speak(translatedWords);
+    await tts.speak(finalPhrase);
 
     if (mounted) setState(() => phraseWords.clear());
   }
@@ -740,8 +798,7 @@ class _HomeShellState extends State<HomeShell> {
     await p.setString('rest_vector', jsonEncode(restVector));
     if (!mounted) return;
     setState(() {});
-    _snack(_t('Postura de reposo guardada.',
-        'Rest position saved.'));
+    _snack(_t('Postura de reposo guardada.', 'Rest position saved.'));
   }
 
   void _snack(String s) => ScaffoldMessenger.of(context).showSnackBar(
@@ -807,6 +864,530 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  Future<void> _showMlKitPreloadDialog() async {
+    if (!mounted) return;
+    final shouldDownload = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: GlassCard(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF0A84FF), Color(0xFF22D3EE)],
+                  ),
+                ),
+                child: const Icon(Icons.translate,
+                    color: Colors.white, size: 30),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                _t('Traducción sin internet', 'Offline translation'),
+                style: const TextStyle(
+                  fontSize: 20, fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                _t(
+                  'Para traducir sin conexión, la app necesita descargar una vez los modelos de idioma (~30 MB cada uno). ¿Descargar ahora español e inglés?',
+                  'To translate offline, the app needs to download the language models once (~30 MB each). Download Spanish and English now?',
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: LiquidButton(
+                      label: _t('Más tarde', 'Later'),
+                      primary: false,
+                      onPressed: () => Navigator.pop(context, false),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: LiquidButton(
+                      label: _t('Descargar', 'Download'),
+                      icon: Icons.download,
+                      onPressed: () => Navigator.pop(context, true),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (shouldDownload != true) return;
+    if (!mounted) return;
+
+    setState(() {
+      _mlPreloading = true;
+      _mlPreloadDone = 0;
+      _mlPreloadTotal = MlKitTranslator.preloadLanguages.length;
+      _mlPreloadCurrentLang = '';
+    });
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          Timer.periodic(const Duration(milliseconds: 300), (t) {
+            if (!_mlPreloading) {
+              t.cancel();
+              return;
+            }
+            setDialogState(() {});
+          });
+          final progress = _mlPreloadTotal == 0
+              ? 0.0
+              : _mlPreloadDone / _mlPreloadTotal;
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            child: GlassCard(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.download,
+                      size: 32, color: Color(0xFF0A84FF)),
+                  const SizedBox(height: 16),
+                  Text(
+                    _t('Descargando modelos...', 'Downloading models...'),
+                    style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _mlPreloadCurrentLang.isEmpty
+                        ? '${_mlPreloadDone}/$_mlPreloadTotal'
+                        : _mlPreloadCurrentLang,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  const SizedBox(height: 16),
+                  LinearProgressIndicator(
+                    value: progress,
+                    minHeight: 8,
+                    backgroundColor:
+                        Colors.white.withValues(alpha: 0.15),
+                    valueColor: const AlwaysStoppedAnimation(
+                      Color(0xFF22D3EE),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${(progress * 100).toStringAsFixed(0)}%',
+                    style: const TextStyle(
+                      fontSize: 14, fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+
+    for (final code in MlKitTranslator.preloadLanguages) {
+      if (!mounted) break;
+      setState(() => _mlPreloadCurrentLang = code);
+      await mlTranslator.downloadModel(code);
+      if (!mounted) break;
+      setState(() => _mlPreloadDone++);
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _mlPreloading = false;
+      _mlPreloadCurrentLang = '';
+      _mlModelsReady = true;
+    });
+
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('ml_models_preloaded', true);
+
+    _snack(_t(
+      'Modelos descargados. Traducción offline lista.',
+      'Models downloaded. Offline translation ready.',
+    ));
+  }
+
+  Future<void> _autoTranslateAll(String targetLang) async {
+    if (gestures.isEmpty) return;
+    if (_autoTranslating) return;
+
+    final alreadyDownloaded =
+        await mlTranslator.isModelDownloaded(targetLang);
+
+    if (!alreadyDownloaded) {
+      if (!mounted) return;
+      final shouldDownload = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => Dialog(
+          backgroundColor: Colors.transparent,
+          child: GlassCard(
+            padding: const EdgeInsets.all(22),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.download,
+                    size: 30, color: Color(0xFF0A84FF)),
+                const SizedBox(height: 14),
+                Text(
+                  _t('Modelo de idioma necesario',
+                      'Language model needed'),
+                  style: const TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _t(
+                    'Para traducir a este idioma hay que descargar su modelo (~30 MB) una sola vez. ¿Continuar?',
+                    'To translate to this language, its model (~30 MB) must be downloaded once. Continue?',
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: LiquidButton(
+                        label: _t('Cancelar', 'Cancel'),
+                        primary: false,
+                        onPressed: () => Navigator.pop(context, false),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: LiquidButton(
+                        label: _t('Descargar', 'Download'),
+                        onPressed: () => Navigator.pop(context, true),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+      if (shouldDownload != true) {
+        if (mounted) setState(() => language = 'es-PA');
+        return;
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _mlPreloading = true;
+        _mlPreloadDone = 0;
+        _mlPreloadTotal = 1;
+        _mlPreloadCurrentLang = targetLang;
+      });
+
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => StatefulBuilder(
+          builder: (context, setDialogState) {
+            Timer.periodic(const Duration(milliseconds: 300), (t) {
+              if (!_mlPreloading) {
+                t.cancel();
+                return;
+              }
+              setDialogState(() {});
+            });
+            return Dialog(
+              backgroundColor: Colors.transparent,
+              child: GlassCard(
+                padding: const EdgeInsets.all(22),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.download,
+                        size: 30, color: Color(0xFF0A84FF)),
+                    const SizedBox(height: 14),
+                    Text(
+                      _t('Descargando modelo...',
+                          'Downloading model...'),
+                      style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    const LinearProgressIndicator(
+                      minHeight: 8,
+                      backgroundColor: Colors.white24,
+                      valueColor: AlwaysStoppedAnimation(
+                        Color(0xFF22D3EE),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      );
+
+      await mlTranslator.downloadModel(targetLang);
+
+      if (!mounted) return;
+      setState(() => _mlPreloading = false);
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _autoTranslating = true;
+      _autoTranslateDone = 0;
+      _autoTranslateTotal = gestures.length;
+    });
+
+    final updated = <TrainingGesture>[];
+    for (final g in gestures) {
+      final r = await mlTranslator.translate(
+        g.id,
+        fromLang: 'es-PA',
+        toLang: targetLang,
+      );
+      if (r.success) {
+        updated.add(g.copyWithAutoTranslations({targetLang: r.text}));
+      } else {
+        updated.add(g);
+      }
+      if (!mounted) break;
+      setState(() => _autoTranslateDone++);
+    }
+
+    if (!mounted) return;
+    setState(() {
+      gestures = updated;
+      _autoTranslating = false;
+    });
+
+    await storage.save(gestures);
+
+    _snack(_t(
+      'Señas traducidas a $targetLang.',
+      'Signs translated to $targetLang.',
+    ));
+  }
+
+  // =========================================================
+  //  Gemma — Descarga del corrector gramatical
+  // =========================================================
+  Future<void> _showGemmaDownloadDialog() async {
+    if (!mounted) return;
+
+    if (_hfToken.isEmpty) {
+      final controller = TextEditingController();
+      final token = await showDialog<String>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: Text(_t('Token de HuggingFace', 'HuggingFace Token')),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(_t(
+                'Gemma 3 1B requiere un token de HuggingFace con acceso aprobado. Pega tu token aquí.',
+                'Gemma 3 1B requires a HuggingFace token with approved access. Paste your token here.',
+              )),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                decoration: const InputDecoration(hintText: 'hf_...'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(_t('Cancelar', 'Cancel')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, controller.text.trim()),
+              child: Text(_t('Guardar', 'Save')),
+            ),
+          ],
+        ),
+      );
+      if (token == null || token.isEmpty) return;
+      _hfToken = token;
+      final p = await SharedPreferences.getInstance();
+      await p.setString('hf_token', _hfToken);
+    }
+
+    final installed = await grammarCorrector.isModelInstalled();
+    if (installed) {
+      _snack(_t('El corrector ya está listo.',
+          'Grammar corrector already ready.'));
+      if (mounted) setState(() => _gemmaModelInstalled = true);
+      return;
+    }
+
+    final shouldDownload = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: GlassCard(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF7C3AED), Color(0xFFEC4899)],
+                  ),
+                ),
+                child: const Icon(Icons.auto_awesome,
+                    color: Colors.white, size: 30),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                _t('Corrector gramatical con IA',
+                    'AI Grammar Corrector'),
+                style: const TextStyle(
+                  fontSize: 20, fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                _t(
+                  'Para mejorar la gramática de las frases sin internet, se descargará Gemma 3 1B (~1 GB) una sola vez. ¿Descargar ahora?',
+                  'To improve grammar offline, Gemma 3 1B (~1 GB) will be downloaded once. Download now?',
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: LiquidButton(
+                      label: _t('Más tarde', 'Later'),
+                      primary: false,
+                      onPressed: () => Navigator.pop(context, false),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: LiquidButton(
+                      label: _t('Descargar', 'Download'),
+                      icon: Icons.download,
+                      onPressed: () => Navigator.pop(context, true),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (shouldDownload != true) return;
+    if (!mounted) return;
+
+    setState(() {
+      _gemmaDownloading = true;
+      _gemmaDownloadProgress = 0.0;
+    });
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          Timer.periodic(const Duration(milliseconds: 300), (t) {
+            if (!_gemmaDownloading) {
+              t.cancel();
+              return;
+            }
+            setDialogState(() {});
+          });
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            child: GlassCard(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.download,
+                      size: 32, color: Color(0xFF7C3AED)),
+                  const SizedBox(height: 16),
+                  Text(
+                    _t('Descargando Gemma 3 1B...',
+                        'Downloading Gemma 3 1B...'),
+                    style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  LinearProgressIndicator(
+                    value: _gemmaDownloadProgress,
+                    minHeight: 8,
+                    backgroundColor:
+                        Colors.white.withValues(alpha: 0.15),
+                    valueColor: const AlwaysStoppedAnimation(
+                      Color(0xFFEC4899),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${(_gemmaDownloadProgress * 100).toStringAsFixed(0)}%',
+                    style: const TextStyle(
+                      fontSize: 14, fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+
+    final ok = await grammarCorrector.downloadModel(
+      huggingFaceToken: _hfToken,
+      onProgress: (p) {
+        if (mounted) setState(() => _gemmaDownloadProgress = p);
+      },
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _gemmaDownloading = false;
+      _gemmaModelInstalled = ok;
+    });
+
+    if (mounted) Navigator.of(context, rootNavigator: true).pop();
+
+    _snack(ok
+        ? _t('Corrector gramatical listo.', 'Grammar corrector ready.')
+        : _t('Error al descargar el modelo.', 'Error downloading model.'));
+  }
+
   @override
   void dispose() {
     ble.removeListener(_refresh);
@@ -814,8 +1395,12 @@ class _HomeShellState extends State<HomeShell> {
     recognizeTimer?.cancel();
     ble.dispose();
     tts.stop();
+    mlTranslator.dispose();
+    grammarCorrector.dispose();
     super.dispose();
-  }  @override
+  }
+
+  @override
   Widget build(BuildContext context) {
     final pages = [
       _translatePage(),
@@ -944,7 +1529,7 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-   Widget _liquidNavBar() {
+  Widget _liquidNavBar() {
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
@@ -1144,6 +1729,56 @@ class _HomeShellState extends State<HomeShell> {
                     const Divider(height: 1),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        _mlModelsReady
+                            ? Icons.check_circle
+                            : Icons.cloud_download_outlined,
+                        color: _mlModelsReady
+                            ? const Color(0xFF22D3EE)
+                            : null,
+                      ),
+                      title: Text(_t(
+                        'Modelos de traducción',
+                        'Translation models',
+                      )),
+                      subtitle: Text(
+                        _mlModelsReady
+                            ? _t('Listos para usar offline',
+                                'Ready for offline use')
+                            : _t('Faltan modelos por descargar',
+                                'Missing models'),
+                      ),
+                      onTap: _showMlKitPreloadDialog,
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        _gemmaModelInstalled
+                            ? Icons.check_circle
+                            : Icons.auto_awesome,
+                        color: _gemmaModelInstalled
+                            ? const Color(0xFF22D3EE)
+                            : null,
+                      ),
+                      title: Text(_t(
+                        'Corrector gramatical (Gemma)',
+                        'Grammar corrector (Gemma)',
+                      )),
+                      subtitle: Text(
+                        _gemmaDownloading
+                            ? _t('Descargando...', 'Downloading...')
+                            : _gemmaModelInstalled
+                                ? _t('Listo', 'Ready')
+                                : _t('No descargado', 'Not downloaded'),
+                      ),
+                      onTap: _gemmaDownloading
+                          ? null
+                          : _showGemmaDownloadDialog,
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.info_outline),
                       title: Text(_t(
                         'Ver aviso de calibración',
@@ -1154,12 +1789,24 @@ class _HomeShellState extends State<HomeShell> {
                   ],
                 ),
               ),
+              const SizedBox(height: 16),
+              Center(
+                child: Text(
+                  _t('Traducido por Google', 'Translated by Google'),
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: Colors.white.withValues(alpha: 0.5),
+                  ),
+                ),
+              ),
             ],
           ),
         ),
       ),
     );
-  }  Widget _translatePage() {
+  }
+
+  Widget _translatePage() {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 30),
       children: [
@@ -1180,7 +1827,6 @@ class _HomeShellState extends State<HomeShell> {
                 ),
               ),
               const SizedBox(height: 20),
-              // Indicador circular
               SizedBox(
                 width: 130,
                 height: 130,
@@ -1227,10 +1873,37 @@ class _HomeShellState extends State<HomeShell> {
                           value: l.code, child: Text(l.label),
                         ))
                     .toList(),
-                onChanged: (v) {
-                  if (v != null) setState(() => language = v);
-                },
+                onChanged: _autoTranslating
+                    ? null
+                    : (v) {
+                        if (v != null) {
+                          setState(() => language = v);
+                          _autoTranslateAll(v);
+                        }
+                      },
               ),
+              if (_autoTranslating) ...[
+                const SizedBox(height: 12),
+                LinearProgressIndicator(
+                  value: _autoTranslateTotal == 0
+                      ? 0
+                      : _autoTranslateDone / _autoTranslateTotal,
+                  minHeight: 6,
+                  backgroundColor: Colors.white.withValues(alpha: 0.15),
+                  valueColor: const AlwaysStoppedAnimation(
+                    Color(0xFF22D3EE),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  _t(
+                    'Traduciendo señas... $_autoTranslateDone/$_autoTranslateTotal',
+                    'Translating signs... $_autoTranslateDone/$_autoTranslateTotal',
+                  ),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 11),
+                ),
+              ],
               const SizedBox(height: 16),
               LiquidButton(
                 label: _t('Reproducir voz', 'Speak'),
@@ -1240,63 +1913,67 @@ class _HomeShellState extends State<HomeShell> {
             ],
           ),
         ),
-        // Toggle de Modo Frase
-GlassCard(
-  child: SwitchListTile(
-    value: phraseMode,
-    onChanged: (v) => setState(() {
-      phraseMode = v;
-      if (!v) phraseWords.clear();
-    }),
-    title: Text(_t('Modo Frase', 'Phrase Mode')),
-    subtitle: Text(_t(
-      'Acumula palabras y reproduce la oración completa',
-      'Accumulate words and speak the full sentence',
-    )),
-  ),
-),
-// Si phraseMode está activo, mostrar palabras acumuladas
-if (phraseMode) ...[
-  const SizedBox(height: 12),
-  GlassCard(
-    child: Column(
-      children: [
-        Text(
-          phraseWords.isEmpty
-              ? _t('Sin palabras aún', 'No words yet')
-              : phraseWords.join(' · '),
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+        GlassCard(
+          child: SwitchListTile(
+            value: phraseMode,
+            onChanged: (v) => setState(() {
+              phraseMode = v;
+              if (!v) phraseWords.clear();
+            }),
+            title: Text(_t('Modo Frase', 'Phrase Mode')),
+            subtitle: Text(_t(
+              'Acumula palabras y reproduce la oración completa',
+              'Accumulate words and speak the full sentence',
+            )),
+          ),
         ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: LiquidButton(
-                label: _t('Reproducir frase', 'Speak phrase'),
-                icon: Icons.volume_up,
-                onPressed: phraseWords.isEmpty ? null : _speakPhrase,
-              ),
+        if (phraseMode) ...[
+          const SizedBox(height: 12),
+          GlassCard(
+            child: Column(
+              children: [
+                Text(
+                  phraseWords.isEmpty
+                      ? _t('Sin palabras aún', 'No words yet')
+                      : phraseWords.join(' · '),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: LiquidButton(
+                        label: _isCorrecting
+                            ? _t('Corrigiendo...', 'Correcting...')
+                            : _t('Reproducir frase', 'Speak phrase'),
+                        icon: _isCorrecting
+                            ? Icons.hourglass_top
+                            : Icons.volume_up,
+                        onPressed: (phraseWords.isEmpty || _isCorrecting)
+                            ? null
+                            : _speakPhrase,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: LiquidButton(
+                        label: _t('Limpiar', 'Clear'),
+                        icon: Icons.clear,
+                        primary: false,
+                        onPressed: phraseWords.isEmpty
+                            ? null
+                            : () => setState(() => phraseWords.clear()),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: LiquidButton(
-                label: _t('Limpiar', 'Clear'),
-                icon: Icons.clear,
-                primary: false,
-                onPressed: phraseWords.isEmpty
-                    ? null
-                    : () => setState(() => phraseWords.clear()),
-              ),
-            ),
-          ],
-        ),
-      ],
-    ),
-  ),
-],
+          ),
+        ],
         const SizedBox(height: 16),
-        // Vista 3D en vivo
         GlassCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1339,6 +2016,19 @@ if (phraseMode) ...[
         ),
         const SizedBox(height: 16),
         _sensorSummary(),
+        const SizedBox(height: 20),
+        Center(
+          child: Text(
+            _t('Traducido por Google', 'Translated by Google'),
+            style: TextStyle(
+              fontSize: 10,
+              color: Theme.of(context)
+                  .colorScheme
+                  .onSurface
+                  .withValues(alpha: 0.5),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -1376,8 +2066,7 @@ if (phraseMode) ...[
       subtitle = _t('Datos válidos', 'Valid data');
       dot = const Color(0xFF22D3EE);
     } else if (ble.receivingBytes(side)) {
-      subtitle =
-          _t('Bytes sin formato', 'Bytes, bad format');
+      subtitle = _t('Bytes sin formato', 'Bytes, bad format');
       dot = const Color(0xFFFFB020);
     } else {
       subtitle = _t('Esperando datos', 'Waiting for data');
@@ -1459,7 +2148,9 @@ if (phraseMode) ...[
     final bits = f.fingers.map((x) => x.round()).join();
     return '$bits · P ${f.pitch.toStringAsFixed(1)}° · '
         'R ${f.roll.toStringAsFixed(1)}°';
-  }  Widget _addSignPage() {
+  }
+
+  Widget _addSignPage() {
     return AddSignPanel(
       uiLanguage: widget.uiLanguage,
       currentVector: _currentVector,
@@ -1508,54 +2199,59 @@ if (phraseMode) ...[
         ),
         const SizedBox(height: 16),
         Row(
-  children: [
-    Expanded(
-      child: OutlinedButton.icon(
-        onPressed: () async {
-          final path = await JsonExporter.exportToJson(gestures);
-          if (!mounted) return;
-          _snack(path != null
-              ? _t('Señas exportadas a: $path', 'Signs exported to: $path')
-              : _t('Error al exportar', 'Export failed'));
-        },
-        icon: const Icon(Icons.upload_file),
-        label: Text(_t('Exportar JSON', 'Export JSON')),
-      ),
-    ),
-    const SizedBox(width: 10),
-    Expanded(
-      child: OutlinedButton.icon(
-        onPressed: () async {
-          final imported = await JsonExporter.importFromJson();
-          if (imported == null) {
-            if (mounted) _snack(_t('Error al importar', 'Import failed'));
-            return;
-          }
-          setState(() {
-            for (final g in imported) {
-              final i = gestures.indexWhere(
-                  (x) => x.id.toLowerCase() == g.id.toLowerCase());
-              if (i >= 0) {
-                gestures[i] = g;
-              } else {
-                gestures.add(g);
-              }
-            }
-          });
-          await storage.save(gestures);
-          if (mounted) {
-            _snack(_t(
-              '${imported.length} seña(s) importada(s)',
-              '${imported.length} sign(s) imported',
-            ));
-          }
-        },
-        icon: const Icon(Icons.download),
-        label: Text(_t('Importar JSON', 'Import JSON')),
-      ),
-    ),
-  ],
-),
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () async {
+                  final path =
+                      await JsonExporter.exportToJson(gestures);
+                  if (!mounted) return;
+                  _snack(path != null
+                      ? _t('Señas exportadas a: $path',
+                          'Signs exported to: $path')
+                      : _t('Error al exportar', 'Export failed'));
+                },
+                icon: const Icon(Icons.upload_file),
+                label: Text(_t('Exportar JSON', 'Export JSON')),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () async {
+                  final imported = await JsonExporter.importFromJson();
+                  if (imported == null) {
+                    if (mounted) {
+                      _snack(_t('Error al importar', 'Import failed'));
+                    }
+                    return;
+                  }
+                  setState(() {
+                    for (final g in imported) {
+                      final i = gestures.indexWhere(
+                          (x) =>
+                              x.id.toLowerCase() == g.id.toLowerCase());
+                      if (i >= 0) {
+                        gestures[i] = g;
+                      } else {
+                        gestures.add(g);
+                      }
+                    }
+                  });
+                  await storage.save(gestures);
+                  if (mounted) {
+                    _snack(_t(
+                      '${imported.length} seña(s) importada(s)',
+                      '${imported.length} sign(s) imported',
+                    ));
+                  }
+                },
+                icon: const Icon(Icons.download),
+                label: Text(_t('Importar JSON', 'Import JSON')),
+              ),
+            ),
+          ],
+        ),
         if (gestures.isEmpty)
           GlassCard(
             child: Padding(
@@ -1651,9 +2347,7 @@ if (phraseMode) ...[
                         ),
                       );
                       if (ok == true) {
-                        await storage.save(
-                          gestures..remove(g),
-                        );
+                        await storage.save(gestures..remove(g));
                         if (mounted) setState(() {});
                       }
                     },
@@ -1665,7 +2359,9 @@ if (phraseMode) ...[
         ),
       ],
     );
-  }  Widget _terminalPage() {
+  }
+
+  Widget _terminalPage() {
     return Column(
       children: [
         Padding(
@@ -1743,7 +2439,9 @@ if (phraseMode) ...[
       ],
     );
   }
-}class Hand3DView extends StatelessWidget {
+}
+
+class Hand3DView extends StatelessWidget {
   final SensorFrame? frame;
   final String label;
   final bool enabled;
@@ -1793,17 +2491,13 @@ class _Hand3DPainter extends CustomPainter {
     final cx = size.width / 2;
     final cy = size.height / 2;
 
-    // Rotaciones en radianes
     final pitch = (f?.pitch ?? 0) * math.pi / 180.0;
     final roll = (f?.roll ?? 0) * math.pi / 180.0;
 
-    // Proyección isométrica simple
     Offset project(List<double> v) {
-      // Rotación pitch (eje X)
       final cp = math.cos(pitch), sp = math.sin(pitch);
       final y1 = v[1] * cp - v[2] * sp;
       final z1 = v[1] * sp + v[2] * cp;
-      // Rotación roll (eje Z)
       final cr = math.cos(roll), sr = math.sin(roll);
       final x2 = v[0] * cr - y1 * sr;
       final y2 = v[0] * sr + y1 * cr;
@@ -1818,7 +2512,6 @@ class _Hand3DPainter extends CustomPainter {
         colors: [Color(0xFF0A84FF), Color(0xFF22D3EE)],
       ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
 
-    // Palma
     final palmPts = <List<double>>[
       [-0.3, 0.4, 0], [0.3, 0.4, 0], [0.4, -0.1, 0],
       [0.2, -0.45, 0], [-0.2, -0.45, 0], [-0.4, -0.1, 0],
@@ -1835,7 +2528,6 @@ class _Hand3DPainter extends CustomPainter {
     palmPath.close();
     canvas.drawPath(palmPath, paint);
 
-    // Dedos: 5 por mano. Cada dedo es un segmento desde la base.
     final extended = f?.fingers ?? [0, 0, 0, 0, 0];
     final baseAngles = [-0.6, -0.3, 0.0, 0.3, 0.6];
     for (int i = 0; i < 5; i++) {
@@ -1851,11 +2543,9 @@ class _Hand3DPainter extends CustomPainter {
         0,
       ];
       canvas.drawLine(project(base), project(tip), paint);
-      // Nudillo
       canvas.drawCircle(project(tip), 2.5, paint);
     }
 
-    // Punto central
     canvas.drawCircle(
       Offset(cx, cy),
       3,
@@ -1865,7 +2555,9 @@ class _Hand3DPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _Hand3DPainter old) => true;
-}class _PulsePainter extends CustomPainter {
+}
+
+class _PulsePainter extends CustomPainter {
   final bool active;
   final double confidence;
   final bool dark;
@@ -1873,14 +2565,13 @@ class _Hand3DPainter extends CustomPainter {
     required this.active,
     required this.confidence,
     required this.dark,
-  });                    
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = size.center(Offset.zero);
     final radius = size.width / 2 - 8;
 
-    // Halo exterior
     final halo = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2
@@ -1890,7 +2581,6 @@ class _Hand3DPainter extends CustomPainter {
           .withValues(alpha: active ? 0.35 : 0.15);
     canvas.drawCircle(center, radius + 6, halo);
 
-    // Círculo base
     final base = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 6
@@ -1899,7 +2589,6 @@ class _Hand3DPainter extends CustomPainter {
               : Colors.black.withValues(alpha: 0.06));
     canvas.drawCircle(center, radius, base);
 
-    // Arco de confianza
     final arc = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 6
@@ -1908,7 +2597,9 @@ class _Hand3DPainter extends CustomPainter {
         colors: [Color(0xFF0A84FF), Color(0xFF22D3EE)],
       ).createShader(Rect.fromCircle(center: center, radius: radius));
 
-    final sweep = active ? (confidence.clamp(0.0, 1.0) * 2 * math.pi) : 0.0;
+    final sweep = active
+        ? (confidence.clamp(0.0, 1.0) * 2 * math.pi)
+        : 0.0;
     canvas.drawArc(
       Rect.fromCircle(center: center, radius: radius),
       -math.pi / 2,
@@ -1923,11 +2614,15 @@ class _Hand3DPainter extends CustomPainter {
       old.active != active ||
       old.confidence != confidence ||
       old.dark != dark;
-}class LogEntry {
+}
+
+class LogEntry {
   final DateTime time;
   final String text;
   LogEntry(this.text) : time = DateTime.now();
-}class AddSignPanel extends StatefulWidget {
+}
+
+class AddSignPanel extends StatefulWidget {
   final String uiLanguage;
   final List<double>? Function() currentVector;
   final SensorFrame? Function() currentLeft;
@@ -1966,11 +2661,8 @@ class _AddSignPanelState extends State<AddSignPanel> {
   bool ready = false;
   String message = '';
 
-  // Para dinámico:
   final List<List<List<double>>> dynamicSamples = [];
   List<List<double>> dynamicRecording = [];
-  final List<SensorFrame> leftLive = [];
-  final List<SensorFrame> rightLive = [];
   Timer? liveTimer;
 
   String _t(String es, String en) =>
@@ -2044,7 +2736,7 @@ class _AddSignPanelState extends State<AddSignPanel> {
       dynamicRecording = [];
       liveTimer?.cancel();
       liveTimer = Timer.periodic(
-        const Duration(milliseconds: 40), // 25 Hz
+        const Duration(milliseconds: 40),
         (_) {
           final v = _filteredVector();
           if (v != null) dynamicRecording.add(v);
@@ -2176,7 +2868,8 @@ class _AddSignPanelState extends State<AddSignPanel> {
                 controller: name,
                 decoration: InputDecoration(
                   labelText: _t('Nombre de la seña', 'Sign name'),
-                  hintText: _t('Ej. Buenos días', 'e.g. Good morning'),
+                  hintText:
+                      _t('Ej. Buenos días', 'e.g. Good morning'),
                 ),
               ),
               const SizedBox(height: 14),
@@ -2184,10 +2877,12 @@ class _AddSignPanelState extends State<AddSignPanel> {
                 children: [
                   Expanded(
                     child: GestureDetector(
-                      onTap: () => setState(() => isDynamic = false),
+                      onTap: () =>
+                          setState(() => isDynamic = false),
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 200),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        padding: const EdgeInsets.symmetric(
+                            vertical: 12),
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(16),
                           gradient: !isDynamic
@@ -2227,7 +2922,8 @@ class _AddSignPanelState extends State<AddSignPanel> {
                       onTap: () => setState(() => isDynamic = true),
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 200),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        padding: const EdgeInsets.symmetric(
+                            vertical: 12),
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(16),
                           gradient: isDynamic
@@ -2273,7 +2969,8 @@ class _AddSignPanelState extends State<AddSignPanel> {
                       onChanged: (v) =>
                           setState(() => useLeft = v ?? true),
                       title: Text(_t('Izquierdo', 'Left')),
-                      controlAffinity: ListTileControlAffinity.leading,
+                      controlAffinity:
+                          ListTileControlAffinity.leading,
                     ),
                   ),
                   Expanded(
@@ -2283,7 +2980,8 @@ class _AddSignPanelState extends State<AddSignPanel> {
                       onChanged: (v) =>
                           setState(() => useRight = v ?? true),
                       title: Text(_t('Derecho', 'Right')),
-                      controlAffinity: ListTileControlAffinity.leading,
+                      controlAffinity:
+                          ListTileControlAffinity.leading,
                     ),
                   ),
                 ],
@@ -2307,17 +3005,15 @@ class _AddSignPanelState extends State<AddSignPanel> {
                   child: CircularProgressIndicator(
                     value: progress,
                     strokeWidth: 8,
-                    backgroundColor: Colors.white
-                        .withValues(alpha: 0.15),
+                    backgroundColor:
+                        Colors.white.withValues(alpha: 0.15),
                     valueColor: const AlwaysStoppedAnimation(
                       Color(0xFF22D3EE),
                     ),
                   ),
                 ),
                 Text(
-                  counting
-                      ? '$countdown'
-                      : '$repetitions/10',
+                  counting ? '$countdown' : '$repetitions/10',
                   style: const TextStyle(
                     fontSize: 24, fontWeight: FontWeight.w800,
                   ),
@@ -2464,7 +3160,6 @@ class _AddSignPanelState extends State<AddSignPanel> {
                     style: const TextStyle(fontSize: 10),
                   ),
                   const SizedBox(height: 8),
-                  // Mini gráfica de aceleración
                   SizedBox(
                     height: 26,
                     child: _MiniAccelChart(
@@ -2514,7 +3209,8 @@ class _MiniAccelPainter extends CustomPainter {
       Offset(x, centerY),
       p,
     );
-    canvas.drawCircle(Offset(x, centerY), 3, p..style = PaintingStyle.fill);
+    canvas.drawCircle(Offset(x, centerY), 3,
+        p..style = PaintingStyle.fill);
   }
 
   @override
